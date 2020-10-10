@@ -1,0 +1,94 @@
+version: '3'
+
+services:
+  traefik:
+    image: traefik:${TRAEFIKVERSION}
+    container_name: traefik
+    command:
+      - --api.insecure=false
+      - --providers.docker
+      - --providers.docker.exposedByDefault=false
+      - --accesslog=true
+      - --accesslog.filePath=/traefik.log
+      - --log=true
+      - --log.level=DEBUG
+      #A utiliser en phase d'implémentation pour éviter de se faire blacklister si trop de tentative en erreur
+      #- --certificatesResolvers.default.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
+      - --certificatesResolvers.default.acme.dnsChallenge.provider=cloudflare
+      - --certificatesResolvers.default.acme.dnsChallenge.resolvers=1.1.1.1:53,1.0.0.1:53
+      - --certificatesResolvers.default.acme.storage=/etc/traefik/acme/acme.json
+      - --certificatesresolvers.default.acme.email=postmaster@${DOMAINNAME}
+      - --entrypoints.http.address=:80
+      - --entrypoints.https.address=:443
+    restart: unless-stopped
+    networks:
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.default-redirect.entrypoints: http
+      traefik.http.routers.default-redirect.middlewares: default-http
+      traefik.http.routers.default-redirect.rule: "HostRegexp(`{any:.*}`)"
+      traefik.http.routers.default-redirect.service: noop@internal
+      traefik.http.routers.traefik.rule: "Host(`traefik.${DOMAINNAME}`) && PathPrefix(`/api`, `/dashboard`)"
+      traefik.http.routers.traefik.entrypoints: https
+      traefik.http.routers.traefik.middlewares: default-https
+      traefik.http.routers.traefik.tls.certResolver: 'default'
+      traefik.http.routers.traefik.service: api@internal
+      traefik.http.middlewares.default-compress.compress: 'true'
+      traefik.http.middlewares.default-http.redirectScheme.scheme: https
+      traefik.http.middlewares.default-http.redirectScheme.permanent: 'true'
+      traefik.http.middlewares.default-https.chain.middlewares: default-compress
+      traefik.http.services.traefik.loadbalancer.server.port: '80'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./folders/traefik:/etc/traefik/acme
+    environment:
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
+      CF_ZONE_API_TOKEN: ${CF_ZONE_API_TOKEN}
+
+  whoami:
+    image: traefik/whoami
+    container_name: whoami
+    networks:
+      - web
+    labels:
+      traefik.backend: whoami
+      traefik.enable: 'true'
+      traefik.http.routers.whoami.rule: "Host(`whoami.${DOMAINNAME}`)"
+      traefik.http.routers.whoami.entrypoints: https
+      traefik.http.routers.whoami.middlewares: keycloak
+      traefik.http.routers.whoami.tls.certResolver: 'default'
+      traefik.http.services.whoami.loadbalancer.server.port: '80'
+
+  traefik-auth:
+    container_name: traefik-auth
+    image: funkypenguin/traefik-forward-auth
+    restart: unless-stopped
+    environment:
+      - CLIENT_ID=${CLIENT_ID}
+      - CLIENT_SECRET=${CLIENT_SECRET}
+      - OIDC_ISSUER=${ISSUER_URL}
+      - SECRET=${OAUTH2_PROXY_COOKIE_SECRET}
+      - AUTH_HOST=auth.${DOMAINNAME}
+      - COOKIE_DOMAINS=${DOMAINNAME}
+    networks:
+      - web
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.auth.entrypoints: https
+      traefik.http.routers.auth.rule: Host("auth.${DOMAINNAME}")
+      traefik.http.services.auth.loadbalancer.server.port: 4181
+      traefik.http.routers.auth.tls: 'true'
+      traefik.http.routers.auth.tls.certresolver: 'default'
+      traefik.http.routers.auth.service: auth@docker
+      traefik.http.routers.auth.middlewares: keycloak
+      traefik.http.middlewares.keycloak.forwardAuth.address: "http://traefik-auth:4181"
+      traefik.http.middlewares.keycloak.forwardAuth.trustForwardHeader: 'true'
+      traefik.http.middlewares.keycloak.forwardAuth.authResponseHeaders: X-Auth-Request-User,X-Auth-Request-Email,Set-Cookie
+
+networks:
+  web:
+   external: true
